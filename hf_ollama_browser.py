@@ -176,21 +176,75 @@ class ModelDownloader:
         # Common quantization patterns like Q4_K, Q5_K, Q6_K, etc.
         quant_pattern = re.compile(r'[QF]\d+[_0-9A-Za-z]*')
         
-        # Dictionary to store quantization levels and their sizes
-        quant_sizes = {}
+        # Dictionary to store quantization levels, their total sizes, and part counts
+        quant_info = {}
         
+        # Group files by directory to identify sharded models
+        files_by_dir = {}
         for file in gguf_files:
-            # Get filename without path
+            path = file['path']
+            dirname = os.path.dirname(path)
+            if dirname not in files_by_dir:
+                files_by_dir[dirname] = []
+            files_by_dir[dirname].append(file)
+        
+        # Process each directory
+        for dirname, dir_files in files_by_dir.items():
+            # Skip if no files in this directory
+            if not dir_files:
+                continue
+                
+            # Extract quantization level from directory name or first file
+            dir_quant = None
+            if dirname:
+                dir_matches = quant_pattern.findall(dirname)
+                if dir_matches:
+                    dir_quant = dir_matches[0]
+            
+            # If no quantization in directory name, try to get it from filenames
+            if not dir_quant and dir_files:
+                filename = os.path.basename(dir_files[0]['path'])
+                file_matches = quant_pattern.findall(filename)
+                if file_matches:
+                    dir_quant = file_matches[0]
+            
+            # If we found a quantization level, sum up all files in this directory
+            if dir_quant:
+                # Calculate total size for this quantization level
+                total_size = sum(f['size'] for f in dir_files if f['size'] is not None)
+                
+                # Store info about this quantization level
+                if dir_quant not in quant_info:
+                    quant_info[dir_quant] = {
+                        'size': total_size,
+                        'parts': len(dir_files),
+                        'is_sharded': len(dir_files) > 1
+                    }
+                else:
+                    # If we already have this quant level, update with larger size
+                    if total_size > quant_info[dir_quant]['size']:
+                        quant_info[dir_quant]['size'] = total_size
+                        quant_info[dir_quant]['parts'] = len(dir_files)
+                        quant_info[dir_quant]['is_sharded'] = len(dir_files) > 1
+        
+        # For any files not in a directory with a quantization level
+        for file in gguf_files:
             filename = os.path.basename(file['path'])
             size = file['size']
-            
+            if size is None:
+                continue
+                
             matches = quant_pattern.findall(filename)
             if matches:
                 for match in matches:
-                    if match not in quant_sizes:
-                        quant_sizes[match] = size
+                    if match not in quant_info:
+                        quant_info[match] = {
+                            'size': size,
+                            'parts': 1,
+                            'is_sharded': False
+                        }
         
-        return quant_sizes
+        return quant_info
     
     def filter_gguf_models(self, models, max_workers=10):
         """Filter models that have GGUF files using parallel processing."""
@@ -444,9 +498,13 @@ def main():
                     tag_options = ["No tag (select GGUF file automatically)"]
                     quant_options = []
                     
-                    for quant, size in quant_levels.items():
-                        size_str = format_size(size) if size is not None else "unknown size"
-                        quant_options.append(f"{quant} ({size_str})")
+                    for quant, info in quant_levels.items():
+                        size_str = format_size(info['size']) if info['size'] is not None else "unknown size"
+                        # Add (Sharded) label for multi-part models
+                        if info['is_sharded']:
+                            quant_options.append(f"{quant} ({size_str}) (Sharded)")
+                        else:
+                            quant_options.append(f"{quant} ({size_str})")
                     
                     tag_options.extend(quant_options)
                     tag_options.append("Custom tag")
@@ -471,7 +529,8 @@ def main():
                     # Selected one of the extracted quantization levels
                     # Extract just the quantization level (without the size) from the selected option
                     selected_option = tag_options[tag_selection]
-                    # The format is "Q4_K (2.1 GB)" - extract just the "Q4_K" part
+                    # The format could be "Q4_K (2.1 GB)" or "Q4_K (2.1 GB) (Sharded)"
+                    # Extract just the "Q4_K" part
                     quant = selected_option.split(" (")[0]
                     downloader.add_to_queue(model_id, quant)
                 

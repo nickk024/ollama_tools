@@ -150,6 +150,11 @@ This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENS
 
 Contributions are welcome! Please feel free to submit a Pull Request.
 
+## Future Goals
+
+- Integration of automatic joining of split (sharded) GGUF files, with subsequent import
+- Importing models other than GGUF?
+
 ## Acknowledgements
 
 - [Hugging Face](https://huggingface.co/) for hosting the model repository

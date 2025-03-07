@@ -33,7 +33,7 @@ This tool simplifies the process of finding and using GGUF models with Ollama by
 
 1. Clone or download this repository:
    ```
-   git clone https://github.com/yourusername/ollama_tools.git
+   git clone https://github.com/nickk024/ollama_tools.git
    cd ollama_tools
    ```
 

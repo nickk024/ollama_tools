@@ -14,10 +14,10 @@ This tool simplifies the process of finding and using GGUF models with Ollama by
 ## Features
 
 - **Intelligent Model Search**: Search Hugging Face for models containing GGUF files
-- **Smart Filtering**: Automatically filters results to show only models with GGUF files
+- **Smart Filtering**: Automatically sorts results by most to least downloaded
 - **Size Information**: Displays file sizes for different quantization options
 - **Quantization Detection**: Automatically detects and groups different quantization levels
-- **Sharded Model Support**: Identifies and properly handles multi-part sharded models
+- **Sharded Model Support**: Identifies and properly handles multi-part sharded models **(planned)**
 - **Download Queue**: Add multiple models to a queue for batch downloading
 - **Concurrent Downloads**: Downloads multiple models simultaneously with controlled concurrency
 - **Automatic Dependency Management**: Checks for and installs required Python packages
@@ -154,6 +154,7 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 
 - Integration of automatic joining of split (sharded) GGUF files, with subsequent import
 - Importing models other than GGUF?
+- Custom Sorting Algorithms
 
 ## Acknowledgements
 

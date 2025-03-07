@@ -7,7 +7,7 @@ import re
 
 def check_and_install_dependencies():
     """Check if required packages are installed, and install them if they're not."""
-    required_packages = ['huggingface_hub', 'simple_term_menu']
+    required_packages = ['huggingface_hub', 'simple_term_menu', 'requests']
     
     print("Checking dependencies...")
     packages_to_install = []
@@ -44,8 +44,9 @@ check_and_install_dependencies()
 # Now import the required packages
 import asyncio
 import concurrent.futures
-from huggingface_hub import HfApi
+from huggingface_hub import HfApi, hf_hub_url
 import time
+import requests
 
 # Import TerminalMenu only if it wasn't already imported in the dependency check
 if 'TerminalMenu' not in globals():
@@ -54,6 +55,8 @@ if 'TerminalMenu' not in globals():
 class ModelDownloader:
     def __init__(self):
         self.api = HfApi()
+        # Add token if you have one
+        self.token = os.environ.get("HF_TOKEN")  # Set this environment variable with your token
         self.download_queue = []  # List of (model_id, tag) tuples
         
     def search_models(self, query, limit=50):
@@ -72,30 +75,122 @@ class ModelDownloader:
             return False
     
     def get_gguf_files(self, model_id):
-        """Get all GGUF files for a model."""
+        """Get all GGUF files for a model with their sizes."""
         try:
+            # First try using the API to get file info
+            print(f"DEBUG: Getting repo info for {model_id}")
+            try:
+                # Try to get repo info which might include file sizes
+                repo_info = self.api.repo_info(repo_id=model_id, files_metadata=True)
+                if hasattr(repo_info, 'siblings') and repo_info.siblings:
+                    print(f"DEBUG: Got repo info with {len(repo_info.siblings)} siblings")
+                    gguf_files = []
+                    for sibling in repo_info.siblings:
+                        if sibling.rfilename.endswith('.gguf'):
+                            print(f"DEBUG: Found GGUF file: {sibling.rfilename}")
+                            if hasattr(sibling, 'size'):
+                                print(f"DEBUG: Got size from API: {sibling.size} bytes ({sibling.size/(1024*1024*1024):.2f} GB)")
+                                gguf_files.append({'path': sibling.rfilename, 'size': sibling.size})
+                            else:
+                                print(f"DEBUG: No size info for {sibling.rfilename}")
+                                gguf_files.append({'path': sibling.rfilename, 'size': None})
+                    
+                    if gguf_files:
+                        print(f"DEBUG: Successfully got {len(gguf_files)} GGUF files with sizes from API")
+                        return gguf_files
+                    else:
+                        print("DEBUG: No GGUF files found in repo info, falling back to list_repo_files")
+                else:
+                    print("DEBUG: No siblings in repo info, falling back to list_repo_files")
+            except Exception as e:
+                print(f"DEBUG: Error getting repo info: {str(e)}, falling back to list_repo_files")
+            
+            # Fallback to the original method
             files = self.api.list_repo_files(model_id)
-            return [file for file in files if file.endswith('.gguf')]
+            gguf_files = []
+            
+            gguf_file_count = len([f for f in files if f.endswith('.gguf')])
+            print(f"DEBUG: Found {gguf_file_count} GGUF files for {model_id}")
+            
+            for file in files:
+                if file.endswith('.gguf'):
+                    # Try direct URL format first
+                    try:
+                        direct_url = f"https://huggingface.co/{model_id}/resolve/main/{file}"
+                        print(f"DEBUG: Requesting HEAD for direct URL: {direct_url}")
+                        
+                        # Add token if available
+                        headers = {}
+                        if self.token:
+                            headers["Authorization"] = f"Bearer {self.token}"
+                            print("DEBUG: Using authentication token")
+                        
+                        response = requests.head(direct_url, headers=headers)
+                        print(f"DEBUG: Response status: {response.status_code}")
+                        print(f"DEBUG: Response headers: {dict(response.headers)}")
+                        
+                        if response.status_code == 200 and 'Content-Length' in response.headers:
+                            size_bytes = int(response.headers['Content-Length'])
+                            print(f"DEBUG: Got size: {size_bytes} bytes ({size_bytes/(1024*1024*1024):.2f} GB)")
+                            gguf_files.append({'path': file, 'size': size_bytes})
+                            continue  # Skip the next attempt if this one worked
+                        else:
+                            print(f"DEBUG: No Content-Length in headers or non-200 status for direct URL")
+                    except Exception as e:
+                        print(f"DEBUG: Exception getting size for direct URL {file}: {str(e)}")
+                    
+                    # If direct URL didn't work, try hf_hub_url
+                    try:
+                        url = hf_hub_url(model_id, file)
+                        print(f"DEBUG: Requesting HEAD for hf_hub_url: {url}")
+                        
+                        # Add token if available
+                        headers = {}
+                        if self.token:
+                            headers["Authorization"] = f"Bearer {self.token}"
+                        
+                        response = requests.head(url, headers=headers)
+                        print(f"DEBUG: Response status: {response.status_code}")
+                        print(f"DEBUG: Response headers: {dict(response.headers)}")
+                        
+                        if response.status_code == 200 and 'Content-Length' in response.headers:
+                            size_bytes = int(response.headers['Content-Length'])
+                            print(f"DEBUG: Got size: {size_bytes} bytes ({size_bytes/(1024*1024*1024):.2f} GB)")
+                            gguf_files.append({'path': file, 'size': size_bytes})
+                        else:
+                            print(f"DEBUG: No Content-Length in headers or non-200 status for hf_hub_url")
+                            # If we can't get the size, still include the file without size
+                            gguf_files.append({'path': file, 'size': None})
+                    except Exception as e:
+                        print(f"DEBUG: Exception getting size for hf_hub_url {file}: {str(e)}")
+                        # If we can't get the size, still include the file without size
+                        gguf_files.append({'path': file, 'size': None})
+            
+            return gguf_files
         except Exception as e:
             print(f"Error getting files for {model_id}: {e}")
             return []
     
     def extract_quantization_levels(self, gguf_files):
-        """Extract quantization levels from GGUF filenames."""
+        """Extract quantization levels from GGUF filenames with their sizes."""
         # Common quantization patterns like Q4_K, Q5_K, Q6_K, etc.
         quant_pattern = re.compile(r'[QF]\d+[_0-9A-Za-z]*')
         
-        quantizations = []
+        # Dictionary to store quantization levels and their sizes
+        quant_sizes = {}
+        
         for file in gguf_files:
             # Get filename without path
-            filename = os.path.basename(file)
+            filename = os.path.basename(file['path'])
+            size = file['size']
+            
             matches = quant_pattern.findall(filename)
             if matches:
                 for match in matches:
-                    if match not in quantizations:
-                        quantizations.append(match)
+                    if match not in quant_sizes:
+                        quant_sizes[match] = size
         
-        return quantizations
+        return quant_sizes
     
     def filter_gguf_models(self, models, max_workers=10):
         """Filter models that have GGUF files using parallel processing."""
@@ -198,7 +293,58 @@ class ModelDownloader:
                 print(f"Removed from queue: {removed[0]}" + (f":{removed[1]}" if removed[1] else ""))
 
 
+# Test function to directly test a HEAD request to a specific file
+def test_head_request():
+    model_id = "TheBloke/Llama-2-7B-Chat-GGUF"  # Example model with GGUF files
+    file = "llama-2-7b-chat.Q4_K_M.gguf"  # Example GGUF file
+    url = hf_hub_url(model_id, file)
+    print(f"\nTesting HEAD request for {url}")
+    try:
+        # Try with and without authentication
+        print("Without authentication:")
+        response = requests.head(url)
+        print(f"Status code: {response.status_code}")
+        print(f"Headers: {dict(response.headers)}")
+        if 'Content-Length' in response.headers:
+            size_bytes = int(response.headers['Content-Length'])
+            print(f"Size: {size_bytes} bytes ({size_bytes/(1024*1024*1024):.2f} GB)")
+        else:
+            print("No Content-Length header found")
+        
+        # Try with a different URL format
+        print("\nTrying direct URL format:")
+        direct_url = f"https://huggingface.co/{model_id}/resolve/main/{file}"
+        response = requests.head(direct_url)
+        print(f"Status code: {response.status_code}")
+        print(f"Headers: {dict(response.headers)}")
+        if 'Content-Length' in response.headers:
+            size_bytes = int(response.headers['Content-Length'])
+            print(f"Size: {size_bytes} bytes ({size_bytes/(1024*1024*1024):.2f} GB)")
+        else:
+            print("No Content-Length header found")
+        
+    except Exception as e:
+        print(f"Exception: {str(e)}")
+
 def main():
+    # Run the test function first
+    print("\n======= Testing HEAD Request =======")
+    test_head_request()
+    
+    # Helper function to format file sizes
+    def format_size(size_bytes):
+        if size_bytes is None:
+            return "unknown size"
+        
+        # Convert to MB
+        size_mb = size_bytes / (1024 * 1024)
+        
+        # Format as MB or GB as appropriate
+        if size_mb > 1000:
+            return f"{size_mb/1024:.1f} GB"
+        else:
+            return f"{size_mb:.1f} MB"
+    
     downloader = ModelDownloader()
     print("\n======= GGUF Model Downloader for Ollama =======")
     
@@ -281,18 +427,29 @@ def main():
                 # Get all GGUF files in the model repository
                 gguf_files = downloader.get_gguf_files(model_id)
                 
-                # Display available files
+                # Display available files with sizes
                 print(f"Found {len(gguf_files)} GGUF files:")
                 for i, file in enumerate(gguf_files, 1):
-                    print(f"{i}. {os.path.basename(file)}")
+                    size_str = format_size(file['size']) if file['size'] is not None else "unknown size"
+                    print(f"{i}. {os.path.basename(file['path'])} ({size_str})")
                 
                 # Extract quantization levels from filenames
                 quant_levels = downloader.extract_quantization_levels(gguf_files)
                 
                 # Prepare options for menu
                 if quant_levels:
-                    print(f"\nAvailable quantization levels: {', '.join(quant_levels)}")
-                    tag_options = ["No tag (select GGUF file automatically)"] + quant_levels + ["Custom tag"]
+                    print(f"\nAvailable quantization levels: {', '.join(quant_levels.keys())}")
+                    
+                    # Create menu options with sizes
+                    tag_options = ["No tag (select GGUF file automatically)"]
+                    quant_options = []
+                    
+                    for quant, size in quant_levels.items():
+                        size_str = format_size(size) if size is not None else "unknown size"
+                        quant_options.append(f"{quant} ({size_str})")
+                    
+                    tag_options.extend(quant_options)
+                    tag_options.append("Custom tag")
                 else:
                     tag_options = ["No tag (select GGUF file automatically)", "Custom tag"]
                 
@@ -312,7 +469,11 @@ def main():
                     downloader.add_to_queue(model_id, custom_tag if custom_tag else None)
                 else:
                     # Selected one of the extracted quantization levels
-                    downloader.add_to_queue(model_id, quant_levels[tag_selection - 1])
+                    # Extract just the quantization level (without the size) from the selected option
+                    selected_option = tag_options[tag_selection]
+                    # The format is "Q4_K (2.1 GB)" - extract just the "Q4_K" part
+                    quant = selected_option.split(" (")[0]
+                    downloader.add_to_queue(model_id, quant)
                 
         elif main_selection == 1:  # View download queue
             downloader.show_download_queue()
